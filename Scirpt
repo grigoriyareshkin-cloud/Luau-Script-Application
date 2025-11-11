@@ -168,6 +168,7 @@ for _, inst in ipairs(workspace:GetDescendants()) do
 	end
 end
 
+--- hellllooooooooo
 
 if SEED_PER_PAD_ON_START > 0 then
 	for _, pad in ipairs(spawnParts) do
@@ -197,3 +198,7 @@ while true do
 		end
 	end
 end
+
+
+
+This Script spawns coins around the map in a specific spot at diffrent times.
