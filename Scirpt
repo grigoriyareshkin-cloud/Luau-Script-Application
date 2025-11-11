@@ -1,0 +1,199 @@
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players           = game:GetService("Players")
+local SoundService      = game:GetService("SoundService")
+local RunService        = game:GetService("RunService")
+
+
+local SPAWN_PART_NAME = "CoinSpawn"
+local COIN_MODEL      = ReplicatedStorage:WaitForChild("Coin")
+
+local MAX_COINS_PER_PART    = 10  
+local SPAWN_INTERVAL        = 0    
+local COIN_VALUE            = 1
+local RESPAWN_TIME          = 90
+local COIN_SOUND_ID         = "rbxassetid://1169755927"
+
+
+local BASE_SPAWN_CHANCE        = 0.18  -- base probability per attempt (0..1) --- NOT AI PUTTING COMMENTS!!!
+local MIN_SPAWN_CHANCE         = 0.02  -- never go below this
+local CHANCE_DECAY_PER_EXISTING= 0.20  -- reduce chance per coin already active on that pad
+local GLOBAL_SOFT_CAP          = 60    -- chance scales down as total active coins approach this
+local SEED_PER_PAD_ON_START    = 1     -- 0 to start empty; 1 to seed at most one coin per pad
+
+--
+local COIN_LIFETIME = nil 
+
+
+local spawnParts  = {}
+local activeCoins = {}       
+local rng = Random.new()
+
+local function totalActiveCoins()
+	local n = 0
+	for _, list in pairs(activeCoins) do
+		n += #list
+	end
+	return n
+end
+
+local function playCoinSound(player)
+	local sound = Instance.new("Sound")
+	sound.SoundId = COIN_SOUND_ID
+	sound.Volume = 0.5
+	sound.Parent = player.Character and player.Character:FindFirstChild("HumanoidRootPart") or SoundService
+	sound:Play()
+	sound.Ended:Connect(function()
+		sound:Destroy()
+	end)
+end
+
+local function getRandomPosition(pad: BasePart)
+	local size = pad.Size
+	local cf   = pad.CFrame
+	local rx = rng:NextNumber(-size.X/2, size.X/2)
+	local rz = rng:NextNumber(-size.Z/2, size.Z/2)
+	local localPos = Vector3.new(rx, size.Y/2 + 1, rz)
+	return cf:PointToWorldSpace(localPos)
+end
+
+local function computeSpawnChanceForPad(pad: BasePart)
+	local existing = #activeCoins[pad]
+
+	local localFactor = math.max(MIN_SPAWN_CHANCE, BASE_SPAWN_CHANCE * (1 - CHANCE_DECAY_PER_EXISTING * existing))
+	
+	local globalFactor = 1.0
+	if GLOBAL_SOFT_CAP and GLOBAL_SOFT_CAP > 0 then
+		globalFactor = math.clamp(1 - (totalActiveCoins() / GLOBAL_SOFT_CAP), 0.15, 1) -- clamp so it never hits 0
+	end
+	return math.clamp(localFactor * globalFactor, MIN_SPAWN_CHANCE, 1)
+end
+
+local function registerCoin(pad: BasePart, coinModel: Model)
+	activeCoins[pad] = activeCoins[pad] or {}
+	table.insert(activeCoins[pad], coinModel)
+
+	if COIN_LIFETIME and COIN_LIFETIME > 0 then
+		task.delay(COIN_LIFETIME, function()
+			if coinModel.Parent then
+			
+				local list = activeCoins[pad]
+				if list then
+					for i, m in ipairs(list) do
+						if m == coinModel then
+							table.remove(list, i)
+							break
+						end
+					end
+				end
+				coinModel:Destroy()
+			end
+		end)
+	end
+end
+
+local function unregisterCoin(pad: BasePart, coinModel: Model)
+	local list = activeCoins[pad]
+	if not list then return end
+	for i, m in ipairs(list) do
+		if m == coinModel then
+			table.remove(list, i)
+			break
+		end
+	end
+end
+
+local function spawnCoinOnPad(pad: BasePart)
+	if #activeCoins[pad] >= MAX_COINS_PER_PART then
+		return
+	end
+
+	local coin = COIN_MODEL:Clone()
+	coin.Parent = workspace
+
+
+	if coin.PrimaryPart then
+		coin:SetPrimaryPartCFrame(CFrame.new(getRandomPosition(pad)))
+	elseif coin:IsA("Model") then
+		coin:PivotTo(CFrame.new(getRandomPosition(pad)))
+	elseif coin:IsA("BasePart") then
+		coin.CFrame = CFrame.new(getRandomPosition(pad))
+	end
+
+	local primary = coin.PrimaryPart or coin:FindFirstChildWhichIsA("BasePart") or coin
+	if not primary then
+		warn("Coin has no base part to connect Touched to.")
+		coin:Destroy()
+		return
+	end
+
+	registerCoin(pad, coin)
+
+	local touchedDebounce = false
+	primary.Touched:Connect(function(hit)
+		if touchedDebounce then return end
+		local player = Players:GetPlayerFromCharacter(hit.Parent)
+		if not player then return end
+		touchedDebounce = true
+
+
+		local leaderstats = player:FindFirstChild("leaderstats")
+		if leaderstats then
+			local coinsValue = leaderstats:FindFirstChild("Coins")
+			if coinsValue and coinsValue:IsA("IntValue") then
+				coinsValue.Value += COIN_VALUE
+			end
+		end
+
+		playCoinSound(player)
+
+		
+		unregisterCoin(pad, coin)
+		coin:Destroy()
+
+		task.delay(RESPAWN_TIME, function()
+		
+			local chance = computeSpawnChanceForPad(pad)
+			if rng:NextNumber() < chance then
+				spawnCoinOnPad(pad)
+			end
+		end)
+	end)
+end
+
+
+for _, inst in ipairs(workspace:GetDescendants()) do
+	if inst:IsA("BasePart") and inst.Name == SPAWN_PART_NAME then
+		table.insert(spawnParts, inst)
+		activeCoins[inst] = {}
+	end
+end
+
+
+if SEED_PER_PAD_ON_START > 0 then
+	for _, pad in ipairs(spawnParts) do
+		if rng:NextNumber() < BASE_SPAWN_CHANCE then
+			spawnCoinOnPad(pad)
+			if SEED_PER_PAD_ON_START > 1 then
+			
+				for i = 2, math.min(SEED_PER_PAD_ON_START, MAX_COINS_PER_PART) do
+					if rng:NextNumber() < computeSpawnChanceForPad(pad) then
+						spawnCoinOnPad(pad)
+					end
+				end
+			end
+		end
+	end
+end
+
+
+while true do
+	task.wait(SPAWN_INTERVAL)
+	for _, pad in ipairs(spawnParts) do
+		if #activeCoins[pad] < MAX_COINS_PER_PART then
+			local chance = computeSpawnChanceForPad(pad)
+			if rng:NextNumber() < chance then
+				spawnCoinOnPad(pad)
+			end
+		end
+	end
+end
